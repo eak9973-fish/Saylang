@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>SayLang</title>
+
+<style>
+body { background:#0b0b0b; color:#eee; font-family:monospace; }
+textarea {
+    width:100%;
+    height:240px;
+    background:#111;
+    color:#0f0;
+    font-size:14px;
+}
+button { margin:4px; padding:6px; }
+#output, #debug {
+    background:black;
+    padding:10px;
+    margin-top:10px;
+    white-space:pre-wrap;
+}
+.row { display:flex; gap:6px; }
+.column { display:flex; flex-direction:column; gap:6px; }
+.error { color:#ff5555; }
+
+#autocomplete {
+    position:absolute;
+    background:#111;
+    border:1px solid #333;
+    color:#0f0;
+    max-height:160px;
+    overflow-y:auto;
+    display:none;
+    z-index:1000;
+}
+.autocomplete-item {
+    padding:4px 8px;
+    cursor:pointer;
+}
+.autocomplete-item:hover,
+.autocomplete-active {
+    background:#333;
+}
+</style>
+</head>
+
+<body>
+
+<pre>
++----------------------+
+|   :)  SayLang        |
+|  Luau-like • Simple  |
++----------------------+
+</pre>
+
+<textarea id="code">
+set x to 0
+while x is less 3 do
+    say x
+    set x to add x 1
+end
+</textarea>
+
+<div id="autocomplete"></div>
+
+<br>
+<button onclick="run()">Run</button>
+<button onclick="save()">Save .say</button>
+<input type="file" onchange="load(event)">
+
+<div id="output"></div>
+<div id="debug"></div>
+
+<script>
+/* ============================
+   CORE LANGUAGE STATE
+============================ */
+let vars={}, funcs={}, lines=[], i=0, returnValue=null;
+let out=document.getElementById("output");
+const dbg=document.getElementById("debug");
+
+/* ============================
+   AUTOCOMPLETE (CONTEXT AWARE)
+============================ */
+const editor=document.getElementById("code");
+const ac=document.getElementById("autocomplete");
+let selectedIndex=0;
+
+const snippets=[
+ {key:"if", text:"if condition then\n    \nend", cursor:3},
+ {key:"while", text:"while condition do\n    \nend", cursor:6},
+ {key:"do", text:"do name\n    \nend", cursor:3},
+ {key:"button", text:"button \"Text\" do\n    \nend", cursor:8},
+ {key:"row", text:"row do\n    \nend", cursor:4},
+ {key:"column", text:"column do\n    \nend", cursor:7}
+];
+
+const keywords=[
+ "say","set","to","if","then","else","end",
+ "while","do","return","add","subtract",
+ "button","row","column","call","true","false"
+];
+
+editor.addEventListener("input", showAutocomplete);
+editor.addEventListener("keydown", handleKeys);
+
+function showAutocomplete(){
+ const pos=editor.selectionStart;
+ const before=editor.value.slice(0,pos);
+ const word=before.split(/\s+/).pop();
+
+ let suggestions=[];
+
+ snippets.forEach(s=>{
+   if(s.key.startsWith(word)&&word.length)
+     suggestions.push({type:"snippet",data:s});
+ });
+
+ keywords.forEach(k=>{
+   if(k.startsWith(word)&&word.length)
+     suggestions.push({type:"word",data:k});
+ });
+
+ Object.keys(vars).forEach(v=>{
+   if(v.startsWith(word)) suggestions.push({type:"word",data:v});
+ });
+
+ Object.keys(funcs).forEach(f=>{
+   if(f.startsWith(word)) suggestions.push({type:"word",data:f});
+ });
+
+ if(!suggestions.length){ac.style.display="none";return;}
+
+ ac.innerHTML=""; selectedIndex=0;
+
+ suggestions.forEach((s,i)=>{
+   const div=document.createElement("div");
+   div.className="autocomplete-item"+(i===0?" autocomplete-active":"");
+   div.textContent=s.type==="snippet"?s.data.key+" ⮕":s.data;
+   div.onclick=()=>insertSuggestion(s,word);
+   ac.appendChild(div);
+ });
+
+ positionAutocomplete();
+ ac.style.display="block";
+}
+
+function insertSuggestion(s,word){
+ const pos=editor.selectionStart;
+ const before=editor.value.slice(0,pos-word.length);
+ const after=editor.value.slice(pos);
+
+ if(s.type==="snippet"){
+   editor.value=before+s.data.text+after;
+   editor.selectionStart=editor.selectionEnd=before.length+s.data.cursor;
+ } else {
+   editor.value=before+s.data+after;
+   editor.selectionStart=editor.selectionEnd=before.length+s.data.length;
+ }
+
+ ac.style.display="none";
+ editor.focus();
+}
+
+function handleKeys(e){
+ if(ac.style.display!=="block")return;
+ const items=ac.children;
+
+ if(e.key==="ArrowDown"){e.preventDefault();selectedIndex=(selectedIndex+1)%items.length;}
+ if(e.key==="ArrowUp"){e.preventDefault();selectedIndex=(selectedIndex-1+items.length)%items.length;}
+
+ if(e.key==="Tab"||e.key==="Enter"){
+   e.preventDefault();
+   items[selectedIndex].click();
+ }
+
+ [...items].forEach((el,i)=>el.classList.toggle("autocomplete-active",i===selectedIndex));
+}
+
+function positionAutocomplete(){
+ const r=editor.getBoundingClientRect();
+ ac.style.left=r.left+"px";
+ ac.style.top=r.bottom+"px";
+ ac.style.width=r.width+"px";
+}
+
+/* ============================
+   LANGUAGE RUNTIME
+============================ */
+function say(x){out.innerHTML+=x+"\n";}
+function err(m){out.innerHTML+=`Error: ${m}\n`;}
+
+function value(v){
+ if(!isNaN(v))return Number(v);
+ if(v==="true")return true;
+ if(v==="false")return false;
+ if(v?.startsWith("{"))return JSON.parse(v.replace(/{/g,"[").replace(/}/g,"]"));
+ if(v?.includes("[")){
+   let[a,b]=v.split("[");
+   return vars[a][Number(b.replace("]",""))];
+ }
+ return vars[v]??v?.replace(/"/g,"");
+}
+
+function debug(line){
+ dbg.textContent="Line: "+line+"\nVars:\n"+JSON.stringify(vars,null,2);
+}
+
+function run(){
+ out.textContent=""; dbg.textContent="";
+ vars={}; funcs={}; returnValue=null;
+ lines=editor.value.split("\n"); i=0;
+
+ while(i<lines.length){
+  let line=lines[i].trim();
+  debug(line);
+  if(!line||line.startsWith("#")){i++;continue;}
+
+  try{
+
+   if(line.startsWith("say ")) say(value(line.slice(4)));
+
+   else if(line.startsWith("set ")){
+     let p=line.split(" ");
+     vars[p[1]]=value(p.slice(3).join(" "));
+   }
+
+   else if(line.startsWith("if ")){
+     let[a,,b]=line.replace("if ","").replace(" then","").split(" ");
+     let t=[],f=[],tar=t; i++;
+     while(!lines[i].trim().startsWith("end")){
+       if(lines[i].trim()==="else")tar=f;
+       else tar.push(lines[i]);
+       i++;
+     }
+     lines.splice(i+1,0,...((value(a)==value(b))?t:f));
+   }
+
+   else if(line.startsWith("while ")){
+     let cond=line.replace("while ","").replace(" do","");
+     let block=[]; i++;
+     while(!lines[i].trim().startsWith("end")){block.push(lines[i]);i++;}
+     let[a,op,b]=cond.split(" ");
+     while(op==="less"?value(a)<value(b):value(a)==value(b))
+       lines.splice(i+1,0,...block);
+   }
+
+   else if(line.startsWith("do ")){
+     let n=line.split(" ")[1],b=[]; i++;
+     while(!lines[i].trim().startsWith("end")){b.push(lines[i]);i++;}
+     funcs[n]=b;
+   }
+
+   else if(line.startsWith("call ")){
+     let n=line.split(" ")[1];
+     if(!funcs[n])err("Unknown function "+n);
+     else{
+       let save=lines;
+       lines=funcs[n].slice();
+       run();
+       lines=save;
+       vars["_"]=returnValue;
+     }
+   }
+
+   else if(line.startsWith("return ")){
+     returnValue=value(line.slice(7));
+     return;
+   }
+
+   else if(line.startsWith("button ")){
+     let t=line.match(/"(.*?)"/)[1],b=[]; i++;
+     while(!lines[i].trim().startsWith("end")){b.push(lines[i]);i++;}
+     let btn=document.createElement("button");
+     btn.textContent=t;
+     btn.onclick=()=>{lines=b.slice();run();};
+     out.appendChild(btn);
+   }
+
+   else if(line.startsWith("row")||line.startsWith("column")){
+     let div=document.createElement("div");
+     div.className=line.startsWith("row")?"row":"column";
+     let b=[]; i++;
+     while(!lines[i].trim().startsWith("end")){b.push(lines[i]);i++;}
+     out.appendChild(div);
+     let saveOut=out,saveLines=lines;
+     out=div; lines=b.slice(); run();
+     out=saveOut; lines=saveLines;
+   }
+
+   else if(line.includes("add")||line.includes("subtract")){
+     let p=line.split(" ");
+     vars[p[0]]=p[1]==="add"
+       ?value(p[2])+value(p[3])
+       :value(p[2])-value(p[3]);
+   }
+
+   else err("Unknown command: "+line);
+
+  }catch(e){err(e.message);}
+  i++;
+ }
+}
+
+function save(){
+ let b=new Blob([editor.value]);
+ let a=document.createElement("a");
+ a.href=URL.createObjectURL(b);
+ a.download="program.say";
+ a.click();
+}
+
+function load(e){
+ let r=new FileReader();
+ r.onload=()=>editor.value=r.result;
+ r.readAsText(e.target.files[0]);
+}
+</script>
+
+<hr>
+
+<h2>📘 SayLang Documentation</h2>
+<p>SayLang is a Luau-inspired, English-readable, Turing-complete scripting language that runs fully in the browser.</p>
+
+<ul>
+<li><b>say</b> – print output</li>
+<li><b>set</b> – create variables</li>
+<li><b>if / else / end</b></li>
+<li><b>while / do / end</b></li>
+<li><b>do / call / return</b> – functions</li>
+<li><b>{ }</b> – tables (arrays)</li>
+<li><b>row / column</b> – UI layouts</li>
+<li><b>button</b> – UI interaction</li>
+</ul>
+
+<p>Autocomplete supports keywords, variables, functions, and block snippets.</p>
+
+</body>
+</html>
